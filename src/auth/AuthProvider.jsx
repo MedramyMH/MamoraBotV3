@@ -19,13 +19,18 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     // Get initial session
     const getSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      setUser(session?.user ?? null);
-      
-      if (session?.user) {
-        await fetchUserProfile(session.user.id);
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        setUser(session?.user ?? null);
+        
+        if (session?.user) {
+          await fetchUserProfile(session.user.id);
+        }
+      } catch (error) {
+        console.error('Error getting session:', error);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
 
     getSession();
@@ -33,9 +38,12 @@ export const AuthProvider = ({ children }) => {
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
+        console.log('Auth state change:', event, session?.user?.email);
         setUser(session?.user ?? null);
         
         if (session?.user) {
+          // Create or update user profile when user signs in
+          await createOrUpdateUserProfile(session.user);
           await fetchUserProfile(session.user.id);
         } else {
           setProfile(null);
@@ -47,6 +55,38 @@ export const AuthProvider = ({ children }) => {
     return () => subscription.unsubscribe();
   }, []);
 
+  const createOrUpdateUserProfile = async (user) => {
+    try {
+      // First check if profile exists
+      const { data: existingProfile } = await supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('id', user.id)
+        .single();
+
+      if (!existingProfile) {
+        // Create new profile with default role
+        const { error } = await supabase
+          .from('user_profiles')
+          .insert({
+            id: user.id,
+            email: user.email,
+            role: 'trader', // Default role
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          });
+
+        if (error) {
+          console.error('Error creating user profile:', error);
+        } else {
+          console.log('User profile created successfully');
+        }
+      }
+    } catch (error) {
+      console.error('Error in createOrUpdateUserProfile:', error);
+    }
+  };
+
   const fetchUserProfile = async (userId) => {
     try {
       const { data, error } = await supabase
@@ -55,8 +95,25 @@ export const AuthProvider = ({ children }) => {
         .eq('id', userId)
         .single();
       
-      if (error) throw error;
-      setProfile(data);
+      if (error) {
+        console.error('Error fetching user profile:', error);
+        // If profile doesn't exist, create it
+        if (error.code === 'PGRST116') {
+          const user = await supabase.auth.getUser();
+          if (user.data?.user) {
+            await createOrUpdateUserProfile(user.data.user);
+            // Try fetching again
+            const { data: newData } = await supabase
+              .from('user_profiles')
+              .select('*')
+              .eq('id', userId)
+              .single();
+            setProfile(newData);
+          }
+        }
+      } else {
+        setProfile(data);
+      }
     } catch (error) {
       console.error('Error fetching user profile:', error);
     }
@@ -66,6 +123,9 @@ export const AuthProvider = ({ children }) => {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
+      options: {
+        emailRedirectTo: `${window.location.origin}/login?confirmed=true`
+      }
     });
     return { data, error };
   };
@@ -80,6 +140,10 @@ export const AuthProvider = ({ children }) => {
 
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
+    if (!error) {
+      setUser(null);
+      setProfile(null);
+    }
     return { error };
   };
 
